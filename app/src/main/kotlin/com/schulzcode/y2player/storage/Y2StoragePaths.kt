@@ -1,0 +1,125 @@
+package com.schulzcode.y2player.storage
+
+import android.os.Environment
+import android.os.SystemClock
+import java.io.File
+
+data class StorageRoot(val id: String, val directory: File)
+
+internal fun preferredWritableRoot(roots: List<StorageRoot>): StorageRoot? =
+    roots.firstOrNull { it.id == "sdcard" && it.directory.canWrite() }
+        ?: roots.firstOrNull { it.directory.canWrite() }
+
+internal fun isFreshUptimeReading(nowMs: Long, readAtMs: Long, maxAgeMs: Long): Boolean =
+    readAtMs >= 0L &&
+        nowMs >= readAtMs &&
+        nowMs - readAtMs <= maxAgeMs
+
+private const val UNREAD_UPTIME_MS = -1L
+
+object Y2StoragePaths {
+    private val candidates = mapOf(
+        "internal" to listOf("/storage/sdcard0", "/mnt/sdcard", "/storage/emulated/0"),
+        "sdcard" to listOf("/storage/sdcard1", "/mnt/sdcard2", "/mnt/extSdCard", "/storage/extSdCard")
+    )
+
+    val roots: List<StorageRoot>
+        get() {
+            val now = SystemClock.uptimeMillis()
+            val cached = cachedRoots
+            if (cached != null && isFreshUptimeReading(now, rootsReadAt, ROOT_CACHE_MS)) return cached
+            return synchronized(this) {
+                val current = cachedRoots
+                if (current != null && isFreshUptimeReading(now, rootsReadAt, ROOT_CACHE_MS)) current
+                else listOf(selectRoot("internal"), selectRoot("sdcard")).also {
+                    cachedRoots = it
+                    rootsReadAt = now
+                }
+            }
+        }
+
+    @Volatile private var mountsReadAt = UNREAD_UPTIME_MS
+    @Volatile private var mountedPaths: Set<String> = emptySet()
+    @Volatile private var rootsReadAt = UNREAD_UPTIME_MS
+    @Volatile private var cachedRoots: List<StorageRoot>? = null
+    private var mountedVolumesReadAt = UNREAD_UPTIME_MS
+    private val mountedVolumes = HashMap<String, Boolean>()
+
+    fun availableRoots(): List<StorageRoot> = roots.filter(::isAvailable)
+
+    @Synchronized
+    fun isVolumeMounted(volumeId: String): Boolean {
+        val now = SystemClock.uptimeMillis()
+        if (!isFreshUptimeReading(now, mountedVolumesReadAt, ROOT_CACHE_MS)) {
+            mountedVolumes.clear()
+            mountedVolumesReadAt = now
+        }
+        mountedVolumes[volumeId]?.let { return it }
+        val mounted = roots.firstOrNull { it.id == volumeId }?.let(::isAvailable) == true
+        mountedVolumes[volumeId] = mounted
+        return mounted
+    }
+
+    @Synchronized
+    fun invalidateMountCaches() {
+        cachedRoots = null
+        rootsReadAt = UNREAD_UPTIME_MS
+        mountedPaths = emptySet()
+        mountsReadAt = UNREAD_UPTIME_MS
+        mountedVolumes.clear()
+        mountedVolumesReadAt = UNREAD_UPTIME_MS
+    }
+
+    fun isAvailable(root: StorageRoot): Boolean {
+        val directory = root.directory
+        if (!directory.exists() || !directory.isDirectory || !directory.canRead()) return false
+        val mounted = currentMounts().any { path ->
+            directory.absolutePath == path || directory.absolutePath.startsWith("$path/") || path.startsWith("${directory.absolutePath}/")
+        }
+        if (mounted) return true
+        if (root.id == "internal") {
+            val state = Environment.getExternalStorageState()
+            if (state == Environment.MEDIA_MOUNTED || state == Environment.MEDIA_MOUNTED_READ_ONLY) return true
+        }
+        // Some MTK builds bind-mount storage without listing the alias in /proc/mounts.
+        return runCatching { directory.listFiles() != null }.getOrDefault(false)
+    }
+
+    fun resolveReadablePath(volumeId: String, relativePath: String, previousAbsolutePath: String): String? {
+        File(previousAbsolutePath).takeIf { it.isFile && it.canRead() }?.let { return it.absolutePath }
+        val safeRelative = relativePath.replace('\\', '/').trimStart('/')
+        if (safeRelative.isEmpty() || safeRelative.contains("../")) return null
+        return candidates[volumeId].orEmpty().asSequence()
+            .map { root -> File(root, safeRelative) }
+            .firstOrNull { it.isFile && it.canRead() }
+            ?.absolutePath
+    }
+
+    private fun selectRoot(id: String): StorageRoot {
+        val paths = candidates[id].orEmpty()
+        val selected = paths.asSequence().map(::File).firstOrNull { directory ->
+            directory.exists() && directory.isDirectory && directory.canRead()
+        } ?: File(paths.first())
+        return StorageRoot(id, selected)
+    }
+
+    private fun currentMounts(): Set<String> {
+        val now = SystemClock.uptimeMillis()
+        if (isFreshUptimeReading(now, mountsReadAt, MOUNT_CACHE_MS)) return mountedPaths
+        synchronized(this) {
+            if (isFreshUptimeReading(now, mountsReadAt, MOUNT_CACHE_MS)) return mountedPaths
+            mountedPaths = runCatching {
+                File("/proc/mounts").useLines { lines ->
+                    lines.mapNotNull { line ->
+                        line.split(' ').getOrNull(1)?.replace("\\040", " ")?.takeIf { it.startsWith('/') }
+                    }.toSet()
+                }
+            }.getOrDefault(emptySet())
+            mountsReadAt = now
+            return mountedPaths
+        }
+    }
+
+    private const val MOUNT_CACHE_MS = 500L
+    private const val ROOT_CACHE_MS = 500L
+}

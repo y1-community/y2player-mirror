@@ -1,0 +1,1137 @@
+package com.schulzcode.y2player.core.state
+
+import com.schulzcode.y2player.core.model.PlaybackStatus
+import com.schulzcode.y2player.core.model.TrackSortOrder
+import com.schulzcode.y2player.core.model.AlbumSortOrder
+import com.schulzcode.y2player.core.model.LibraryScope
+import com.schulzcode.y2player.core.model.Track
+import com.schulzcode.y2player.core.model.SleepTimerMode
+import com.schulzcode.y2player.core.model.YearSortOrder
+import com.schulzcode.y2player.core.state.AppEffect.*
+import com.schulzcode.y2player.core.state.ScreenRow.Action
+import com.schulzcode.y2player.core.state.ScreenRow.Folder
+import com.schulzcode.y2player.core.state.ScreenRow.Group
+import com.schulzcode.y2player.core.state.ScreenRow.TrackRow
+import com.schulzcode.y2player.playback.AudioBalance
+
+object AppReducer {
+    private const val MAX_SEARCH_QUERY_LENGTH = 64
+    fun reduce(state: AppState, action: AppAction): Reduction = when (action) {
+        is AppAction.SeekFraction -> if (state.currentScreen is Screen.Search || state.currentScreen == Screen.FmRadio ||
+            !action.fraction.isFinite() || state.playback.durationMs <= 0 || state.playback.currentTrackId == null) Reduction(state)
+            else Reduction(state, listOf(SeekBy((state.playback.durationMs * action.fraction.coerceIn(0f, 1f).toDouble()).toLong() - state.playback.positionMs)))
+        is AppAction.SkinCommand -> if (state.currentScreen is Screen.Search || state.currentScreen == Screen.FmRadio) Reduction(state)
+            else Reduction(state, when (action.command) {
+                "volumeUp" -> listOf(AdjustVolume(1)); "volumeDown" -> listOf(AdjustVolume(-1))
+                "shuffle" -> listOf(ToggleShuffle); "repeat" -> listOf(CycleRepeat); else -> emptyList()
+            })
+        is AppAction.WheelMoved -> if (state.currentScreen is Screen.Search) moveSearch(state, action.delta) else moveSelection(clearAlphabetScrub(state), action.delta)
+        is AppAction.AlphabetMoved -> moveAlphabet(state, action.direction)
+        AppAction.EndAlphabetScrub -> Reduction(clearAlphabetScrub(state))
+        AppAction.Confirm -> if (state.currentScreen is Screen.Search) confirmSearch(state) else confirm(clearAlphabetScrub(state))
+        AppAction.ConfirmLong -> if (state.currentScreen is Screen.Search) confirmSearchLong(state) else confirmLong(clearAlphabetScrub(state))
+        AppAction.ShowNowPlaying -> if (state.currentScreen is Screen.Search) Reduction(state) else showNowPlaying(clearAlphabetScrub(state))
+        AppAction.Back -> if (state.transientMessage != null) {
+            Reduction(clearAlphabetScrub(state).copy(transientMessage = null))
+        } else {
+            if (state.currentScreen is Screen.Search) backSearch(clearAlphabetScrub(state)) else back(clearAlphabetScrub(state))
+        }
+        AppAction.NavigateHome -> Reduction(
+            if (state.screenStack.size == 1 && state.currentScreen == Screen.MainMenu) clearAlphabetScrub(state)
+            else clearAlphabetScrub(state).copy(screenStack = listOf(ScreenEntry(Screen.MainMenu))),
+            if (state.currentScreen == Screen.FmRadio) listOf(FmClose) else emptyList()
+        )
+        AppAction.Left -> if (state.currentScreen is Screen.Search) Reduction(state) else Reduction(state, listOf(PreviousTrack))
+        AppAction.Right -> if (state.currentScreen is Screen.Search) Reduction(state) else Reduction(state, listOf(NextTrack))
+        AppAction.PlayPause -> if (state.currentScreen is Screen.Search) Reduction(state) else Reduction(state, listOf(TogglePlayback))
+        // On the FM screen the transport buttons hand the search to the tuner,
+        // which uses its own signal threshold instead of stepping blindly.
+        AppAction.MediaNext ->
+            if (state.currentScreen == Screen.FmRadio) Reduction(state, listOf(FmSeek(true)))
+            else Reduction(state, listOf(NextTrack))
+        AppAction.MediaPrevious ->
+            if (state.currentScreen == Screen.FmRadio) Reduction(state, listOf(FmSeek(false)))
+            else Reduction(state, listOf(PreviousTrack))
+        AppAction.MediaStop -> if (state.playback.status == com.schulzcode.y2player.core.model.PlaybackStatus.PLAYING || state.playback.status == com.schulzcode.y2player.core.model.PlaybackStatus.PREPARING) Reduction(state, listOf(TogglePlayback)) else Reduction(state)
+        AppAction.SeekBackward -> if (state.currentScreen is Screen.Search) Reduction(state) else Reduction(state, listOf(SeekBy(-state.preferences.seekStepMs.toLong())))
+        AppAction.SeekForward -> if (state.currentScreen is Screen.Search) Reduction(state) else Reduction(state, listOf(SeekBy(state.preferences.seekStepMs.toLong())))
+        AppAction.SeekBackwardLong -> if (state.currentScreen is Screen.Search) Reduction(state) else Reduction(state, listOf(SeekBy(-state.preferences.longSeekStepMs.toLong())))
+        AppAction.SeekForwardLong -> if (state.currentScreen is Screen.Search) Reduction(state) else Reduction(state, listOf(SeekBy(state.preferences.longSeekStepMs.toLong())))
+        is AppAction.LibraryChanged -> Reduction(preserveSelection(state, state.copy(library = action.library, alphabetScrub = null)))
+        is AppAction.PlaybackChanged -> Reduction(playbackChanged(state, action.playback))
+        is AppAction.DeviceChanged -> Reduction(preserveSelection(state, state.copy(device = action.device)))
+        is AppAction.BluetoothChanged -> Reduction(preserveSelection(state, state.copy(bluetooth = action.bluetooth)))
+        is AppAction.DisplayChanged -> Reduction(state.copy(display = action.display))
+        is AppAction.PreferencesChanged -> Reduction(preserveSelection(state, state.copy(preferences = action.preferences, alphabetScrub = null)))
+        is AppAction.DiagnosticsChanged -> Reduction(preserveSelection(state, state.copy(diagnostics = action.diagnostics)))
+        is AppAction.BackupChanged -> Reduction(preserveSelection(state, state.copy(backup = action.backup)))
+        is AppAction.BackupImportReady -> Reduction(
+            pushState(
+                state.copy(backup = state.backup.copy(importPreview = action.summary)),
+                Screen.ConfirmAction(ConfirmPrompts.IMPORT_BACKUP),
+                ScreenContent.CONFIRM_DEFAULT_INDEX
+            )
+        )
+        is AppAction.FmChanged -> Reduction(state.copy(fm = action.fm))
+        is AppAction.SkinsChanged -> Reduction(preserveSelection(state, state.copy(skins = action.catalog)))
+        is AppAction.SafeModeChanged -> Reduction(state.copy(safeMode = action.enabled))
+        is AppAction.ShowMessage -> Reduction(state.copy(transientMessage = action.message))
+        is AppAction.SelectIndex -> if (state.currentScreen is Screen.Search) focusSearchResult(state, action.index) else Reduction(normalizeSelection(setSelected(clearAlphabetScrub(state), action.index.coerceAtLeast(0))))
+        is AppAction.PressSearchKey -> pressSearchKey(state, action.key)
+    }
+
+    private fun moveAlphabet(state: AppState, direction: Int): Reduction {
+        if (direction == 0) return Reduction(state)
+        return AlphabetNavigation.move(state, direction)?.let(::Reduction)
+            ?: Reduction(clearAlphabetScrub(state))
+    }
+
+    private fun clearAlphabetScrub(state: AppState): AppState =
+        if (state.alphabetScrub == null) state else state.copy(alphabetScrub = null)
+
+    private fun playbackChanged(state: AppState, playback: com.schulzcode.y2player.core.model.PlaybackSnapshot): AppState {
+        val progressOnly = isProgressOnlyUpdate(state.playback, playback)
+        val updated = state.copy(playback = playback)
+        if (progressOnly) return updated
+
+        val queueEntryId = when (val screen = updated.currentScreen) {
+            is Screen.QueueOptions -> screen.entryId
+            is Screen.QueueMove -> screen.entryId
+            else -> null
+        }
+        return if (queueEntryId != null && playback.queue.none { it.id == queueEntryId }) {
+            normalizeSelection(pop(updated))
+        } else normalizeSelection(updated)
+    }
+
+    private fun moveSelection(state: AppState, delta: Int): Reduction {
+        if (delta == 0) return Reduction(state)
+        // The wheel tunes on the FM screen, the way it changes volume on Now Playing.
+        if (state.currentScreen == Screen.FmRadio) return Reduction(state, listOf(FmTune(delta)))
+        if (state.currentScreen == Screen.NowPlaying) return Reduction(state, listOf(AdjustVolume(if (delta > 0) 1 else -1)))
+        val queueMove = state.currentScreen as? Screen.QueueMove
+        if (queueMove != null) return moveQueuePreview(state, queueMove, delta)
+        val count = ScreenContent.rows(state).size
+        if (count == 0) return Reduction(state)
+        val next = ListNavigationPolicy.nextIndex(
+            screen = state.currentScreen,
+            currentIndex = state.selectedIndex,
+            delta = delta,
+            itemCount = count,
+            wrapLists = state.preferences.wrapLists
+        )
+        return if (next == state.selectedIndex) Reduction(state) else Reduction(setSelected(state, next))
+    }
+
+    private fun moveSearch(state: AppState, delta: Int): Reduction {
+        val screen = state.currentScreen as? Screen.Search ?: return Reduction(state)
+        if (!screen.resultsFocused) {
+            return Reduction(replaceSearch(
+                state,
+                SearchKeyboard.moveLinear(screen, delta, state.preferences.wrapLists)
+            ))
+        }
+        val count = ScreenContent.rows(state).size
+        if (count == 0) return Reduction(replaceSearch(state, screen.copy(resultsFocused = false)))
+        val next = ListNavigationPolicy.nextIndex(screen, state.selectedIndex, delta, count, state.preferences.wrapLists)
+        return Reduction(setSelected(state, next))
+    }
+
+    private fun pressSearchKey(state: AppState, key: String): Reduction {
+        val screen = state.currentScreen as? Screen.Search ?: return Reduction(state)
+        if (key !in SearchKeyboard.rows.flatten()) return Reduction(state)
+        return applySearchKey(state, screen, key)
+    }
+
+    private fun confirmSearch(state: AppState): Reduction {
+        val screen = state.currentScreen as? Screen.Search ?: return Reduction(state)
+        if (!screen.resultsFocused) return applySearchKey(state, screen, SearchKeyboard.key(screen))
+        val result = ScreenContent.searchResults(state).getOrNull(state.selectedIndex) ?: return Reduction(state)
+        return when (result) {
+            is DeviceSearchResult.TrackResult -> Reduction(toNowPlaying(state), listOf(PlayCollection(listOf(result.track.id), 0)))
+            is DeviceSearchResult.AlbumResult -> push(state, Screen.AlbumSongs(result.key.title, result.key.albumArtist))
+            is DeviceSearchResult.ArtistResult -> push(state, Screen.ArtistAlbums(result.title))
+            is DeviceSearchResult.PlaylistResult -> push(state, Screen.PlaylistTracks(result.id, result.title))
+            is DeviceSearchResult.AudiobookResult -> push(state, Screen.AudiobookOptions(result.folderKey))
+        }
+    }
+
+    private fun confirmSearchLong(state: AppState): Reduction {
+        val screen = state.currentScreen as? Screen.Search ?: return Reduction(state)
+        if (!screen.resultsFocused) return confirmSearch(state)
+        val result = ScreenContent.searchResults(state).getOrNull(state.selectedIndex) ?: return Reduction(state)
+        return when (result) {
+            is DeviceSearchResult.TrackResult -> push(state, Screen.TrackOptions(result.track.id))
+            is DeviceSearchResult.AlbumResult -> {
+                val ids = state.library.index.organization.albumTracks(LibraryScope.All, result.key).map(Track::id)
+                push(state, Screen.CollectionOptions(result.title, ids))
+            }
+            is DeviceSearchResult.ArtistResult -> {
+                val ids = state.library.index.organization.artistTracks(
+                    LibraryScope.All, result.title, state.preferences.albumSortOrder
+                ).map(Track::id)
+                push(state, Screen.CollectionOptions(result.title, ids))
+            }
+            is DeviceSearchResult.PlaylistResult -> push(
+                state,
+                Screen.CollectionOptions(result.title, state.library.playlistTrackIds[result.id].orEmpty())
+            )
+            is DeviceSearchResult.AudiobookResult -> push(state, Screen.AudiobookOptions(result.folderKey))
+        }
+    }
+
+    private fun applySearchKey(state: AppState, screen: Screen.Search, key: String): Reduction = when (key) {
+        SearchKeyboard.RESULTS -> if (ScreenContent.rows(state).isEmpty()) Reduction(state)
+            else Reduction(replaceSearch(state, screen.copy(resultsFocused = true)))
+        SearchKeyboard.DELETE -> updateSearchQuery(state, screen.query.dropLast(1))
+        SearchKeyboard.CLEAR -> updateSearchQuery(state, "")
+        SearchKeyboard.SPACE -> if (screen.query.isBlank() || screen.query.endsWith(' ')) Reduction(state)
+            else updateSearchQuery(state, screen.query + " ")
+        else -> if (screen.query.length >= MAX_SEARCH_QUERY_LENGTH) Reduction(state)
+            else updateSearchQuery(state, screen.query + key)
+    }
+
+    private fun updateSearchQuery(state: AppState, query: String): Reduction {
+        val screen = state.currentScreen as? Screen.Search ?: return Reduction(state)
+        return Reduction(replaceSearch(state, screen.copy(query = query, resultsFocused = false), selectedIndex = 0))
+    }
+
+    private fun focusSearchResult(state: AppState, index: Int): Reduction {
+        val screen = state.currentScreen as? Screen.Search ?: return Reduction(state)
+        val last = ScreenContent.rows(state).lastIndex
+        if (last < 0) return Reduction(state)
+        return Reduction(replaceSearch(state, screen.copy(resultsFocused = true), index.coerceIn(0, last)))
+    }
+
+    private fun backSearch(state: AppState): Reduction {
+        val screen = state.currentScreen as? Screen.Search ?: return Reduction(state)
+        return when {
+            screen.resultsFocused -> Reduction(replaceSearch(state, screen.copy(resultsFocused = false)))
+            screen.query.isNotEmpty() -> updateSearchQuery(state, screen.query.dropLast(1))
+            else -> back(state)
+        }
+    }
+
+    private fun replaceSearch(state: AppState, screen: Screen.Search, selectedIndex: Int = state.selectedIndex): AppState =
+        state.copy(screenStack = state.screenStack.dropLast(1) + ScreenEntry(screen, selectedIndex))
+
+    private fun confirm(state: AppState): Reduction {
+        if (state.currentScreen == Screen.FmRadio) return Reduction(state, listOf(FmTogglePower))
+        if (state.currentScreen == Screen.NowPlaying) return Reduction(state)
+        val screenRows = ScreenContent.rows(state)
+        if (screenRows.isEmpty()) return confirmEmptyScreen(state)
+        val row = screenRows.getOrNull(state.selectedIndex) ?: return Reduction(state)
+        return when (val screen = state.currentScreen) {
+            Screen.MainMenu -> confirmMainMenu(state, row)
+            // Handled above: the FM screen has no rows, so it never gets here.
+            Screen.FmRadio -> Reduction(state)
+            is Screen.Search -> confirmSearch(state)
+            Screen.Music -> confirmMusic(state, row)
+            Screen.Audiobooks -> confirmAudiobook(state, row)
+            is Screen.AudiobookOptions -> confirmAudiobookOptions(state, screen, row)
+            is Screen.AudiobookChapters -> confirmAudiobookChapter(state, screen, row)
+            Screen.Songs, Screen.Favorites, Screen.RecentlyPlayed,
+            is Screen.ArtistSongs, is Screen.AlbumSongs, is Screen.FacetTracks ->
+                if ((row as? Action)?.key == ScreenContent.COLLECTION_SHUFFLE_KEY) shuffleCollection(state)
+                else playSelected(state)
+            is Screen.ArtistAlbums -> confirmArtistAlbums(state, screen, row)
+            Screen.Albums -> openAlbum(state, LibraryScope.All, row)
+            Screen.Artists -> openArtist(state, row, scoped = null)
+            Screen.Genres, Screen.Years -> confirmFacetValue(state, row)
+            is Screen.FacetMenu -> confirmFacetMenu(state, screen, row)
+            is Screen.FacetArtists -> openArtist(state, row, screen.scope)
+            is Screen.FacetAlbums -> openFacetAlbum(state, screen.scope, row)
+            is Screen.FacetArtistAlbums -> confirmFacetArtistAlbums(state, screen, row)
+            is Screen.Folders -> when (row) {
+                is Folder -> push(state, Screen.Folders(row.volumeId, row.relativePath))
+                is TrackRow -> playSelected(state)
+                else -> Reduction(state)
+            }
+            Screen.Playlists -> confirmPlaylists(state, row)
+            is Screen.PlaylistTracks -> when {
+                row is TrackRow -> playSelected(state)
+                (row as? Action)?.key == ScreenContent.COLLECTION_SHUFFLE_KEY -> shuffleCollection(state)
+                else -> confirmPlaylistAction(state, screen, row)
+            }
+            is Screen.TrackOptions -> confirmTrackOptions(state, screen, row)
+            is Screen.TrackBrowse -> confirmTrackBrowse(state, screen, row)
+            is Screen.TrackDetails -> Reduction(state)
+            is Screen.AddToPlaylist -> confirmAddToPlaylist(state, screen.trackId, row)
+            is Screen.CollectionOptions -> confirmCollectionOptions(state, screen, row)
+            is Screen.MultiSelect -> confirmMultiSelect(state, screen, row)
+            is Screen.QueueOptions -> confirmQueueOptions(state, row)
+            is Screen.QueueMove -> confirmQueueMove(state, screen)
+            Screen.QueueManagement -> confirmQueueManagement(state, row)
+            Screen.Queue -> when (row) {
+                is Action -> if (row.key == "queue_actions") push(state, Screen.QueueManagement) else Reduction(state)
+                is TrackRow -> row.queueEntry?.let { playQueueEntryNow(state, it.id, it.trackId) }
+                    ?: Reduction(state)
+                is Group -> openQueueEntryOptions(state, row)
+                else -> Reduction(state)
+            }
+            Screen.NowPlayingOptions -> confirmNowPlayingOptions(state, row)
+            Screen.SleepTimer -> confirmSleepTimer(state, row)
+            Screen.Audio -> confirmAudio(state, row)
+            Screen.Settings -> confirmSettings(state, row)
+            Screen.PlaybackTransitions, Screen.PlaybackSeeking, Screen.PlaybackVolume,
+            Screen.PlaybackInterruptions -> confirmPlaybackPreference(state, row)
+            Screen.SoundEffects -> confirmSoundEffects(state, row)
+            Screen.EqualizerSettings -> confirmEqualizerSettings(state, row)
+            Screen.EqualizerPresets -> confirmEqualizerPreset(state, row)
+            Screen.OutputInformation -> confirmOutput(state, row)
+            Screen.EqualizerBands -> confirmEqualizerBands(state, row)
+            is Screen.EqualizerBandLevel -> confirmEqualizerBandLevel(state, screen, row)
+            Screen.SortOrder -> confirmSortOrder(state, row)
+            Screen.TrackSorting -> confirmTrackSorting(state, row)
+            Screen.AlbumSorting -> confirmAlbumSorting(state, row)
+            Screen.YearSorting -> confirmYearSorting(state, row)
+            Screen.Bluetooth -> confirmBluetooth(state, row)
+            is Screen.BluetoothDevice -> confirmBluetoothDevice(state, row)
+            is Screen.ConfirmAction -> confirmConfirmAction(state, screen, row)
+            Screen.InterfaceSettings -> confirmInterfaceSettings(state, row)
+            Screen.LibrarySettings -> confirmLibrarySettings(state, row)
+            Screen.Skins -> confirmSkins(state, row)
+            Screen.Display -> confirmDisplay(state, row)
+            Screen.Controls -> confirmControls(state, row)
+            Screen.Balance -> confirmBalance(state, row)
+            Screen.Brightness -> confirmBrightness(state, row)
+            Screen.ScreenTimeout -> confirmTimeout(state, row)
+            Screen.Storage -> confirmStorage(state, row)
+            Screen.PlaybackHistory -> confirmPlaybackHistory(state, row)
+            Screen.System -> confirmSystem(state, row)
+            Screen.BackupRestore -> confirmBackupRestore(state, row)
+            Screen.Diagnostics -> confirmDiagnostics(state, row)
+            Screen.Reset -> confirmReset(state, row)
+            Screen.About -> Reduction(state)
+            Screen.NowPlaying -> Reduction(state)
+        }
+    }
+
+    private fun confirmMainMenu(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "music" -> push(state, Screen.Music)
+            "audiobooks" -> Reduction(pushState(state, Screen.Audiobooks), listOf(RefreshAudiobooks))
+            "fm_radio" -> Reduction(pushState(state, Screen.FmRadio), listOf(FmOpen))
+            "search" -> push(state, Screen.Search())
+            "shuffle_all" -> Reduction(toNowPlaying(state), listOf(ShuffleAll))
+            "settings" -> push(state, Screen.Settings)
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmMusic(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "shuffle_all" -> Reduction(toNowPlaying(state), listOf(ShuffleAll))
+            "songs" -> push(state, Screen.Songs)
+            "albums" -> push(state, Screen.Albums)
+            "artists" -> push(state, Screen.Artists)
+            "genres" -> push(state, Screen.Genres)
+            "years" -> push(state, Screen.Years)
+            "playlists" -> push(state, Screen.Playlists)
+            "favorites" -> push(state, Screen.Favorites)
+            "recent" -> push(state, Screen.RecentlyPlayed)
+            "folders" -> push(state, Screen.Folders())
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmPlaylists(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when {
+            key == "playlist_create" -> Reduction(state, listOf(CreatePlaylist))
+            key.startsWith("playlist:") -> {
+                val id = key.substringAfter(':').toLongOrNull() ?: return Reduction(state)
+                val playlist = state.library.playlists.firstOrNull { it.id == id } ?: return Reduction(state)
+                push(state, Screen.PlaylistTracks(id, playlist.name))
+            }
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmPlaylistAction(state: AppState, screen: Screen.PlaylistTracks, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return if (key.startsWith("playlist_delete:")) push(
+            state,
+            Screen.ConfirmAction(ConfirmPrompts.DELETE_PLAYLIST + screen.playlistId),
+            selectedIndex = ScreenContent.CONFIRM_DEFAULT_INDEX
+        ) else Reduction(state)
+    }
+
+    private fun confirmTrackOptions(state: AppState, screen: Screen.TrackOptions, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        val trackId = screen.trackId
+        return when {
+            key.startsWith("track_next:") -> Reduction(pop(state), listOf(PlayNext(listOf(trackId))))
+            key.startsWith("track_queue:") -> Reduction(pop(state), listOf(AddToUpNext(listOf(trackId))))
+            key.startsWith("track_favorite:") -> Reduction(pop(state), listOf(ToggleFavorite(trackId)))
+            key.startsWith("track_playlist:") -> push(state, Screen.AddToPlaylist(trackId))
+            key.startsWith("track_multi:") -> openMultiSelect(state, trackId)
+            key.startsWith("track_browse:") -> push(state, Screen.TrackBrowse(trackId))
+            key.startsWith("track_details:") -> push(state, Screen.TrackDetails(trackId))
+            key.startsWith("track_remove_playlist:") -> {
+                val parts = key.split(':')
+                val playlistId = parts.getOrNull(1)?.toLongOrNull() ?: return Reduction(state)
+                Reduction(pop(state), listOf(RemoveTrackFromPlaylist(playlistId, trackId)))
+            }
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmTrackBrowse(state: AppState, screen: Screen.TrackBrowse, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        val track = state.library.byId[screen.trackId] ?: return Reduction(state)
+        return when {
+            key.startsWith("track_album:") -> push(state, Screen.AlbumSongs(track.displayAlbum, track.albumArtistName))
+            key.startsWith("track_artist:") -> push(state, Screen.ArtistAlbums(track.primaryArtist))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmAddToPlaylist(state: AppState, trackId: Long, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        fun closeAddToPlaylist(): AppState = state.screenStack.dropLast(2)
+            .let { state.copy(screenStack = it.ifEmpty { listOf(ScreenEntry(Screen.MainMenu)) }) }
+        return when {
+            key == "playlist_create_and_add" -> Reduction(closeAddToPlaylist(), listOf(CreatePlaylistWithTrack(trackId)))
+            key.startsWith("playlist_add:") -> {
+                val id = key.substringAfter(':').toLongOrNull() ?: return Reduction(state)
+                Reduction(closeAddToPlaylist(), listOf(AddTrackToPlaylist(id, trackId)))
+            }
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmQueueOptions(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        fun entryId() = key.substringAfter(':', "-1").toLongOrNull() ?: -1L
+        return when {
+            key.startsWith("queue_play:") -> Reduction(toNowPlaying(pop(state)), listOf(PlayQueueEntry(entryId())))
+            key.startsWith("queue_next:") -> {
+                val queue = pop(state)
+                val target = if (state.playback.currentQueueEntryId == null) 0 else 1
+                Reduction(setSelected(queue, target.coerceAtMost(state.playback.queue.lastIndex) + 1), listOf(PromoteQueueEntry(entryId())))
+            }
+            key.startsWith("queue_move:") -> {
+                val index = state.playback.queue.indexOfFirst { it.id == entryId() }
+                if (index < 0) Reduction(state) else push(state, Screen.QueueMove(entryId(), index), index)
+            }
+            key.startsWith("queue_remove:") -> Reduction(pop(state), listOf(RemoveQueueEntry(entryId())))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmQueueManagement(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "queue_clear_up_next" -> Reduction(state, listOf(ClearUpNext))
+            "queue_clear_remaining" -> Reduction(state, listOf(ClearRemaining))
+            "queue_clear" -> push(
+                state,
+                Screen.ConfirmAction(ConfirmPrompts.CLEAR_QUEUE),
+                selectedIndex = ScreenContent.CONFIRM_DEFAULT_INDEX
+            )
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmAudio(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "output" -> push(state, Screen.OutputInformation)
+            "playback_transitions" -> push(state, Screen.PlaybackTransitions)
+            "playback_volume" -> push(state, Screen.PlaybackVolume)
+            "sound_effects" -> push(state, Screen.SoundEffects)
+            "playback_interruptions" -> push(state, Screen.PlaybackInterruptions)
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmSettings(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "audio" -> push(state, Screen.Audio)
+            "bluetooth" -> push(state, Screen.Bluetooth)
+            "interface" -> push(state, Screen.InterfaceSettings)
+            // The Listening History subtitle is read here, so the count has to be
+            // fetched on the way in rather than when that row is pressed.
+            "library_settings" -> Reduction(pushState(state, Screen.LibrarySettings), listOf(RefreshPlaybackHistory))
+            "system" -> push(state, Screen.System)
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmInterfaceSettings(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "display" -> push(state, Screen.Display)
+            "controls" -> push(state, Screen.Controls)
+            "extra_track_info" -> Reduction(state, listOf(ToggleExtraTrackInfo))
+            "show_fm_radio" -> Reduction(state, listOf(ToggleShowFmRadio))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmLibrarySettings(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "sort" -> push(state, Screen.SortOrder)
+            "storage" -> push(state, Screen.Storage)
+            "playback_history" -> Reduction(pushState(state, Screen.PlaybackHistory), listOf(RefreshPlaybackHistory))
+            "playlist_import_m3u" -> Reduction(state, listOf(ImportM3uPlaylists))
+            "playlist_export_m3u" -> Reduction(state, listOf(ExportM3uPlaylists))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmSystem(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "diagnostics" -> push(state, Screen.Diagnostics)
+            "backup_restore" -> push(state, Screen.BackupRestore)
+            "reset" -> push(state, Screen.Reset)
+            "android_settings" -> Reduction(state, listOf(OpenAndroidSettings))
+            "about" -> push(state, Screen.About)
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmPlaybackPreference(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "pause_disconnect" -> Reduction(state, listOf(TogglePauseOnDisconnect))
+            "gapless" -> Reduction(state, listOf(ToggleGapless))
+            "crossfade" -> Reduction(state, listOf(CycleCrossfade))
+            "crossfade_mode" -> Reduction(state, listOf(CycleCrossfadeMode))
+            "pause_fade" -> Reduction(state, listOf(CyclePauseFade))
+            "seek_step" -> Reduction(state, listOf(CycleSeekStep))
+            "long_seek_step" -> Reduction(state, listOf(CycleLongSeekStep))
+            "seek_when_locked" -> Reduction(state, listOf(ToggleSeekWhenLocked))
+            "previous_threshold" -> Reduction(state, listOf(CyclePreviousThreshold))
+            "duck_focus" -> Reduction(state, listOf(ToggleDuckOnFocusLoss))
+            "volume_mode" -> Reduction(state, listOf(CycleVolumeMode))
+            "replay_gain" -> Reduction(state, listOf(CycleReplayGain))
+            "balance" -> push(state, Screen.Balance)
+            "resume_position" -> Reduction(state, listOf(ToggleResumePosition))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmSoundEffects(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "effects_toggle" -> Reduction(state, listOf(ToggleAudioEffects))
+            "equalizer" -> push(state, Screen.EqualizerSettings)
+            "bass" -> Reduction(state, listOf(CycleBassStrength))
+            "loudness" -> Reduction(state, listOf(CycleLoudnessGain))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmOutput(state: AppState, row: ScreenRow): Reduction =
+        if ((row as? Action)?.key == "audio_quality") Reduction(state, listOf(CycleAudioQuality))
+        else Reduction(state)
+
+    private fun confirmReset(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "reset_queue" -> push(state, Screen.ConfirmAction(ConfirmPrompts.CLEAR_QUEUE), selectedIndex = ScreenContent.CONFIRM_DEFAULT_INDEX)
+            "reset_library" -> push(state, Screen.ConfirmAction(ConfirmPrompts.RESET_LIBRARY), selectedIndex = ScreenContent.CONFIRM_DEFAULT_INDEX)
+            "reset_safe_mode" -> Reduction(state, listOf(if (state.safeMode) ExitSafeMode else EnterSafeMode))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmEqualizerSettings(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "eq_preset" -> push(
+                state,
+                Screen.EqualizerPresets,
+                selectedIndex = (state.preferences.equalizerPreset + 1)
+                    .coerceIn(0, state.playback.audioEffects.presetNames.size)
+            )
+            "eq_bands" -> push(state, Screen.EqualizerBands)
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmEqualizerPreset(state: AppState, row: ScreenRow): Reduction {
+        val index = (row as? Action)?.key?.substringAfter("eq_preset:", "")?.toIntOrNull()
+            ?: return Reduction(state)
+        if (index !in -1 until state.playback.audioEffects.presetNames.size) return Reduction(state)
+        return Reduction(pop(state), listOf(SetEqualizerPreset(index)))
+    }
+
+    private fun confirmEqualizerBands(state: AppState, row: ScreenRow): Reduction {
+        val index = (row as? Action)?.key?.substringAfter("eq_band:", "")?.toIntOrNull() ?: return Reduction(state)
+        if (index !in state.playback.audioEffects.bandFrequenciesHz.indices) return Reduction(state)
+        val levels = ScreenContent.equalizerBandLevels(state)
+        val current = ScreenContent.equalizerBandLevel(state, index)
+        val selected = levels.indices.minByOrNull { kotlin.math.abs(levels[it] - current) } ?: 0
+        return push(state, Screen.EqualizerBandLevel(index), selectedIndex = selected)
+    }
+
+    private fun confirmEqualizerBandLevel(
+        state: AppState,
+        screen: Screen.EqualizerBandLevel,
+        row: ScreenRow
+    ): Reduction {
+        val level = (row as? Action)?.key?.substringAfter("eq_level:", "")?.toIntOrNull()
+            ?: return Reduction(state)
+        if (level !in ScreenContent.equalizerBandLevels(state)) return Reduction(state)
+        return Reduction(pop(state), listOf(SetEqualizerBand(screen.bandIndex, level)))
+    }
+
+    private fun confirmSortOrder(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "sort_tracks" -> push(state, Screen.TrackSorting)
+            "sort_albums" -> push(state, Screen.AlbumSorting)
+            "sort_years" -> push(state, Screen.YearSorting)
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmTrackSorting(state: AppState, row: ScreenRow): Reduction {
+        val raw = (row as? Action)?.key?.substringAfter("track_sort:", "") ?: return Reduction(state)
+        val order = TrackSortOrder.fromStorage(raw).takeIf { raw == it.storageId || raw == it.name } ?: return Reduction(state)
+        return Reduction(pop(state), listOf(SetSortOrder(order)))
+    }
+
+    private fun confirmAlbumSorting(state: AppState, row: ScreenRow): Reduction {
+        val raw = (row as? Action)?.key?.substringAfter("album_sort:", "") ?: return Reduction(state)
+        val order = AlbumSortOrder.fromStorage(raw).takeIf { raw == it.storageId || raw == it.name }
+            ?: return Reduction(state)
+        return Reduction(pop(state), listOf(SetAlbumSortOrder(order)))
+    }
+
+    private fun confirmYearSorting(state: AppState, row: ScreenRow): Reduction {
+        val raw = (row as? Action)?.key?.substringAfter("year_sort:", "") ?: return Reduction(state)
+        val order = YearSortOrder.fromStorage(raw).takeIf { raw == it.storageId || raw == it.name }
+            ?: return Reduction(state)
+        return Reduction(pop(state), listOf(SetYearSortOrder(order)))
+    }
+
+    private fun confirmBluetooth(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when {
+            key == "bt_toggle" -> when (state.bluetooth.adapterMode) {
+                BluetoothAdapterMode.ON, BluetoothAdapterMode.TURNING_ON -> Reduction(state, listOf(SetBluetoothEnabled(false)))
+                BluetoothAdapterMode.OFF, BluetoothAdapterMode.TURNING_OFF -> Reduction(state, listOf(SetBluetoothEnabled(true)))
+                BluetoothAdapterMode.UNSUPPORTED -> Reduction(state.copy(transientMessage = "Bluetooth hardware is unavailable"))
+            }
+            key == "bt_scan" -> Reduction(state, listOf(if (state.bluetooth.isDiscovering) StopBluetoothScan else StartBluetoothScan))
+            key == "bt_refresh" -> Reduction(state, listOf(RefreshBluetoothService))
+            key.startsWith("bt_device:") -> Reduction(state, listOf(ActivateBluetoothDevice(key.substringAfter(':'))))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmAudiobook(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        if (!key.startsWith(ScreenContent.AUDIOBOOK_KEY_PREFIX)) return Reduction(state)
+        val entry = ScreenContent.audiobookEntry(state, key.substringAfter(':')) ?: return Reduction(state)
+        if (entry.chapterIds.isEmpty()) return Reduction(state)
+        return Reduction(toNowPlaying(state), listOf(PlayCollection(entry.chapterIds, entry.startIndex)))
+    }
+
+    private fun confirmAudiobookOptions(
+        state: AppState,
+        screen: Screen.AudiobookOptions,
+        row: ScreenRow
+    ): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        val folderKey = screen.folderKey
+        return when {
+            key.startsWith(ScreenContent.AUDIOBOOK_CHAPTERS_KEY) ->
+                push(state, Screen.AudiobookChapters(folderKey), selectedIndex = currentChapterIndex(state, folderKey))
+            key.startsWith(ScreenContent.AUDIOBOOK_RESTART_KEY) -> {
+                val entry = ScreenContent.audiobookEntry(state, folderKey) ?: return Reduction(state)
+                if (entry.chapterIds.isEmpty()) return Reduction(state)
+                Reduction(toNowPlaying(state), listOf(PlayCollection(entry.chapterIds, 0, fromStart = true)))
+            }
+            key.startsWith(ScreenContent.AUDIOBOOK_CLEAR_KEY) -> push(
+                state,
+                Screen.ConfirmAction(ConfirmPrompts.CLEAR_AUDIOBOOK + folderKey),
+                selectedIndex = ScreenContent.CONFIRM_DEFAULT_INDEX
+            )
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmAudiobookChapter(
+        state: AppState,
+        screen: Screen.AudiobookChapters,
+        row: ScreenRow
+    ): Reduction {
+        val track = (row as? TrackRow)?.track ?: return Reduction(state)
+        val entry = ScreenContent.audiobookEntry(state, screen.folderKey) ?: return Reduction(state)
+        val index = entry.chapterIds.indexOf(track.id)
+        if (index < 0) return Reduction(state)
+        return Reduction(toNowPlaying(state), listOf(PlayCollection(entry.chapterIds, index, fromStart = true)))
+    }
+
+    private fun currentChapterIndex(state: AppState, folderKey: String): Int =
+        ScreenContent.audiobookEntry(state, folderKey)?.let { it.chapterNumber?.minus(1) } ?: 0
+
+    private fun confirmBluetoothDevice(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when {
+            key.startsWith("bt_device_activate:") ->
+                Reduction(pop(state), listOf(ActivateBluetoothDevice(key.substringAfter(':'))))
+            key.startsWith("bt_device_forget:") -> push(
+                state,
+                Screen.ConfirmAction(ConfirmPrompts.FORGET_DEVICE + key.substringAfter(':')),
+                selectedIndex = ScreenContent.CONFIRM_DEFAULT_INDEX
+            )
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmConfirmAction(state: AppState, screen: Screen.ConfirmAction, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            ScreenContent.CONFIRM_CANCEL_KEY -> Reduction(pop(state))
+            ScreenContent.CONFIRM_OK_KEY -> confirmedAction(state, screen.key)
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmedAction(state: AppState, actionKey: String): Reduction = when {
+        actionKey.startsWith(ConfirmPrompts.FORGET_DEVICE) ->
+            Reduction(pop(state, 2), listOf(ForgetBluetoothDevice(actionKey.substringAfter(':'))))
+        actionKey.startsWith(ConfirmPrompts.CLEAR_AUDIOBOOK) ->
+            Reduction(pop(state, 2), listOf(ClearAudiobookProgress(actionKey.substringAfter(':'))))
+        actionKey == ConfirmPrompts.CLEAR_QUEUE -> Reduction(pop(state), listOf(ClearQueue))
+        actionKey == ConfirmPrompts.RESET_LIBRARY -> Reduction(pop(state), listOf(ResetLibrary))
+        actionKey == ConfirmPrompts.CLEAR_HISTORY -> Reduction(pop(state), listOf(ClearPlaybackHistory))
+        actionKey == ConfirmPrompts.CLEAR_DIAGNOSTICS -> Reduction(pop(state), listOf(ClearDiagnostics))
+        actionKey == ConfirmPrompts.IMPORT_BACKUP -> Reduction(pop(state), listOf(ImportBackup))
+        actionKey.startsWith(ConfirmPrompts.DELETE_PLAYLIST) -> {
+            val id = actionKey.substringAfter(':').toLongOrNull()
+            if (id == null) Reduction(pop(state)) else Reduction(pop(state, 2), listOf(DeletePlaylist(id)))
+        }
+        else -> Reduction(pop(state))
+    }
+
+    private fun confirmDisplay(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "brightness" -> push(state, Screen.Brightness)
+            "timeout" -> push(state, Screen.ScreenTimeout)
+            "keep_screen_on" -> Reduction(state, listOf(ToggleKeepScreenOn))
+            "extra_track_info" -> Reduction(state, listOf(ToggleExtraTrackInfo))
+            "theme" -> push(state, Screen.Skins)
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmSkins(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        if (key.startsWith("skin_error:")) return Reduction(state.copy(transientMessage = state.skins.errors.getOrNull(key.substringAfter(':').toIntOrNull() ?: -1)))
+        if (key == "reload_skins") return Reduction(state, listOf(ReloadSkins))
+        val id = key.removePrefix("skin:")
+        return if (key.startsWith("skin:") && state.skins.available.any { it.id == id })
+            Reduction(state, listOf(SetSkin(id))) else Reduction(state)
+    }
+
+    private fun confirmArtistAlbums(state: AppState, screen: Screen.ArtistAlbums, row: ScreenRow): Reduction = when {
+        (row as? Action)?.key == "artist_all_songs" -> push(state, Screen.ArtistSongs(screen.artist))
+        row is Group -> openAlbum(state, LibraryScope.All, row)
+        else -> Reduction(state)
+    }
+
+    private fun confirmFacetValue(state: AppState, row: ScreenRow): Reduction {
+        val scope = ((row as? Group)?.target as? ScreenGroupTarget.Scope)?.scope ?: return Reduction(state)
+        return push(state, Screen.FacetMenu(scope))
+    }
+
+    private fun confirmFacetMenu(state: AppState, screen: Screen.FacetMenu, row: ScreenRow): Reduction =
+        when ((row as? Action)?.key) {
+            "facet_all_tracks" -> push(state, Screen.FacetTracks(screen.scope, screen.scope.label))
+            "facet_artists" -> push(state, Screen.FacetArtists(screen.scope))
+            "facet_albums" -> push(state, Screen.FacetAlbums(screen.scope))
+            else -> Reduction(state)
+        }
+
+    private fun openArtist(state: AppState, row: ScreenRow, scoped: LibraryScope?): Reduction {
+        val group = row as? Group ?: return Reduction(state)
+        val artist = (group.target as? ScreenGroupTarget.Artist)?.name ?: group.key
+        return if (scoped == null) push(state, Screen.ArtistAlbums(artist))
+        else push(state, Screen.FacetArtistAlbums(scoped, artist))
+    }
+
+    private fun openAlbum(state: AppState, scope: LibraryScope, row: ScreenRow): Reduction {
+        val key = ((row as? Group)?.target as? ScreenGroupTarget.Album)?.key ?: return Reduction(state)
+        val album = ScreenContent.albumEntry(state, scope, key) ?: return Reduction(state)
+        return push(state, Screen.AlbumSongs(album.title, album.albumArtist))
+    }
+
+    private fun openFacetAlbum(state: AppState, scope: LibraryScope, row: ScreenRow): Reduction {
+        val key = ((row as? Group)?.target as? ScreenGroupTarget.Album)?.key ?: return Reduction(state)
+        val album = ScreenContent.albumEntry(state, scope, key) ?: return Reduction(state)
+        return push(state, Screen.FacetTracks(scope, album.title, album = key))
+    }
+
+    private fun confirmFacetArtistAlbums(
+        state: AppState,
+        screen: Screen.FacetArtistAlbums,
+        row: ScreenRow
+    ): Reduction = when {
+        (row as? Action)?.key == "facet_artist_all_tracks" ->
+            push(state, Screen.FacetTracks(screen.scope, screen.artist, artist = screen.artist))
+        row is Group -> openFacetAlbum(state, screen.scope, row)
+        else -> Reduction(state)
+    }
+
+    private fun moveQueuePreview(state: AppState, screen: Screen.QueueMove, delta: Int): Reduction {
+        val entry = state.playback.queue.firstOrNull { it.id == screen.entryId } ?: return Reduction(pop(state))
+        val allowed = state.playback.queue.indices.filter { index ->
+            index > 0 && state.playback.queue[index].origin == entry.origin
+        }
+        if (allowed.isEmpty()) return Reduction(state)
+        val target = (screen.targetIndex + delta).coerceIn(allowed.first(), allowed.last())
+        if (target == screen.targetIndex) return Reduction(state)
+        return Reduction(state.copy(
+            screenStack = state.screenStack.dropLast(1) + ScreenEntry(screen.copy(targetIndex = target), target)
+        ))
+    }
+
+    private fun confirmQueueMove(state: AppState, screen: Screen.QueueMove): Reduction {
+        val source = state.playback.queue.indexOfFirst { it.id == screen.entryId }
+        if (source < 0) return Reduction(pop(state, 2))
+        val queue = pop(state, 2)
+        val selected = setSelected(queue, screen.targetIndex.coerceIn(0, state.playback.queue.lastIndex) + 1)
+        val delta = screen.targetIndex - source
+        return if (delta == 0) Reduction(selected) else Reduction(
+            selected,
+            listOf(MoveQueueEntry(screen.entryId, delta))
+        )
+    }
+
+    private fun confirmCollectionOptions(
+        state: AppState,
+        screen: Screen.CollectionOptions,
+        row: ScreenRow
+    ): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "collection_next" -> Reduction(pop(state), listOf(PlayNext(screen.trackIds)))
+            "collection_up_next" -> Reduction(pop(state), listOf(AddToUpNext(screen.trackIds)))
+            "collection_up_next_shuffled" -> Reduction(pop(state), listOf(AddToUpNext(screen.trackIds, shuffled = true)))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun openMultiSelect(state: AppState, selectedTrackId: Long): Reduction {
+        val parentStack = state.screenStack.dropLast(1)
+        if (parentStack.isEmpty()) return Reduction(state)
+        val parent = state.copy(screenStack = parentStack)
+        val ids = ScreenContent.playableTrackIds(parent)
+        val selectedIndex = ids.indexOf(selectedTrackId)
+        if (selectedIndex < 0) return Reduction(state)
+        return Reduction(state.copy(
+            screenStack = parentStack + ScreenEntry(
+                Screen.MultiSelect(ids, setOf(selectedIndex)),
+                selectedIndex
+            )
+        ))
+    }
+
+    private fun confirmMultiSelect(
+        state: AppState,
+        screen: Screen.MultiSelect,
+        row: ScreenRow
+    ): Reduction {
+        val index = (row as? TrackRow)?.selectionIndex ?: return Reduction(state)
+        val selected = screen.selectedIndices.toMutableSet().apply {
+            if (!add(index)) remove(index)
+        }
+        val updatedScreen = screen.copy(selectedIndices = selected)
+        return Reduction(state.copy(
+            screenStack = state.screenStack.dropLast(1) + state.currentEntry.copy(screen = updatedScreen)
+        ))
+    }
+
+    private fun confirmBalance(state: AppState, row: ScreenRow): Reduction {
+        val value = (row as? Action)?.key?.substringAfter("balance:", "")?.toIntOrNull()
+            ?: return Reduction(state)
+        return Reduction(pop(state), listOf(SetBalance(AudioBalance.clamp(value))))
+    }
+
+    private fun confirmControls(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "ui_sounds" -> Reduction(state, listOf(ToggleUiSoundEffects))
+            "playback_seeking" -> push(state, Screen.PlaybackSeeking)
+            "haptics" -> Reduction(state, listOf(CycleHapticLevel))
+            "wrap_lists" -> Reduction(state, listOf(ToggleWrapLists))
+            "screen_off_keys" -> Reduction(state, listOf(ToggleLocalKeysWhileScreenOff))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmBrightness(state: AppState, row: ScreenRow): Reduction {
+        val percent = (row as? Action)?.key?.substringAfter("brightness:", "")?.toIntOrNull() ?: return Reduction(state)
+        return Reduction(pop(state), listOf(SetBrightness(percent)))
+    }
+
+    private fun confirmTimeout(state: AppState, row: ScreenRow): Reduction {
+        val timeout = (row as? Action)?.key?.substringAfter("timeout:", "")?.toIntOrNull() ?: return Reduction(state)
+        return Reduction(pop(state), listOf(SetScreenTimeout(timeout)))
+    }
+
+    private fun confirmStorage(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when {
+            key == "rescan" -> Reduction(state, listOf(RequestLibraryScan))
+            key.startsWith("storage:") -> {
+                val id = key.substringAfter(':')
+                if (state.device.storageVolumes.firstOrNull { it.id == id }?.available == true) push(state, Screen.Folders(id, ""))
+                else Reduction(state.copy(transientMessage = "Storage is not mounted"))
+            }
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmPlaybackHistory(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return if (key == "history_clear") push(
+            state,
+            Screen.ConfirmAction(ConfirmPrompts.CLEAR_HISTORY),
+            selectedIndex = ScreenContent.CONFIRM_DEFAULT_INDEX
+        ) else Reduction(state)
+    }
+
+    private fun confirmDiagnostics(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "diag_export" -> Reduction(state, listOf(ExportDiagnostics))
+            "diag_clear" -> push(
+                state,
+                Screen.ConfirmAction(ConfirmPrompts.CLEAR_DIAGNOSTICS),
+                selectedIndex = ScreenContent.CONFIRM_DEFAULT_INDEX
+            )
+            "diag_verbose" -> Reduction(state, listOf(ToggleVerboseDiagnostics))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmLong(state: AppState): Reduction = when {
+        state.currentScreen == Screen.NowPlaying -> push(state, Screen.NowPlayingOptions)
+        state.currentScreen.isRadialMenu() -> back(state)
+        state.currentScreen is Screen.MultiSelect -> {
+            val screen = state.currentScreen as Screen.MultiSelect
+            val ids = screen.trackIds.filterIndexed { index, _ ->
+                index in screen.selectedIndices
+            }
+            if (ids.isEmpty()) Reduction(state.copy(transientMessage = "Select at least one song"))
+            else push(state, Screen.CollectionOptions("${ids.size} selected", ids))
+        }
+        else -> openContextOptions(state)
+    }
+
+    private fun confirmBackupRestore(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when (key) {
+            "backup_export" -> Reduction(state, listOf(ExportBackup))
+            "backup_import" -> Reduction(state, listOf(InspectBackup))
+            else -> Reduction(state)
+        }
+    }
+
+    private fun showNowPlaying(state: AppState): Reduction = when {
+        state.currentScreen == Screen.NowPlaying -> Reduction(state)
+        state.playback.currentTrackId == null && state.playback.queue.isEmpty() -> Reduction(state)
+        else -> Reduction(toNowPlaying(state))
+    }
+
+    private fun confirmNowPlayingOptions(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        return when {
+            key == "shuffle" -> Reduction(state, listOf(ToggleShuffle))
+            key == "repeat" -> Reduction(state, listOf(CycleRepeat))
+            key == "sleep_timer" -> push(
+                state,
+                Screen.SleepTimer,
+                selectedIndex = ScreenContent.sleepTimerSelectionIndex(state)
+            )
+            key == "queue" -> push(state, Screen.Queue, selectedIndex = 1)
+            key.startsWith("np_audiobook_chapters:") ->
+                push(state, Screen.AudiobookChapters(key.substringAfter(':')))
+            key.startsWith("np_favorite:") -> {
+                val id = key.substringAfter(':').toLongOrNull() ?: return Reduction(state)
+                Reduction(state, listOf(ToggleFavorite(id)))
+            }
+            key.startsWith("np_playlist:") -> {
+                val id = key.substringAfter(':').toLongOrNull() ?: return Reduction(state)
+                push(state, Screen.AddToPlaylist(id))
+            }
+            key.startsWith("np_track_options:") -> {
+                val id = key.substringAfter(':').toLongOrNull() ?: return Reduction(state)
+                push(state, Screen.TrackOptions(id, fromNowPlaying = true))
+            }
+            key.startsWith("np_track_details:") -> {
+                val id = key.substringAfter(':').toLongOrNull() ?: return Reduction(state)
+                push(state, Screen.TrackDetails(id))
+            }
+            else -> Reduction(state)
+        }
+    }
+
+    private fun confirmSleepTimer(state: AppState, row: ScreenRow): Reduction {
+        val key = (row as? Action)?.key ?: return Reduction(state)
+        val effect = when {
+            key == "sleep_timer_off" -> SetSleepTimer(SleepTimerMode.OFF)
+            key == "sleep_timer_end_track" -> SetSleepTimer(SleepTimerMode.END_TRACK)
+            key == "sleep_timer_end_album" -> SetSleepTimer(SleepTimerMode.END_ALBUM)
+            key == "sleep_timer_end_queue" -> SetSleepTimer(SleepTimerMode.END_QUEUE)
+            key.startsWith("sleep_timer_minutes:") -> {
+                val minutes = key.substringAfter(':').toIntOrNull() ?: return Reduction(state)
+                SetSleepTimer(SleepTimerMode.MINUTES, minutes)
+            }
+            else -> return Reduction(state)
+        }
+        return Reduction(pop(state), listOf(effect))
+    }
+
+    private fun playSelected(state: AppState): Reduction {
+        val selection = ScreenContent.selectedTrackCollection(state) ?: return Reduction(state)
+        if (isTrackLoaded(state, selection.first.getOrNull(selection.second))) {
+            return Reduction(toNowPlaying(state))
+        }
+        return Reduction(toNowPlaying(state), listOf(PlayCollection(selection.first, selection.second)))
+    }
+
+    private fun isTrackLoaded(state: AppState, trackId: Long?): Boolean =
+        trackId != null && state.playback.currentTrackId == trackId &&
+            (state.playback.status == PlaybackStatus.PLAYING || state.playback.status == PlaybackStatus.PAUSED)
+
+    private fun shuffleCollection(state: AppState): Reduction {
+        val ids = ScreenContent.playableTrackIds(state)
+        return if (ids.isEmpty()) Reduction(state)
+        else Reduction(toNowPlaying(state), listOf(PlayCollection(ids, 0, shuffled = true)))
+    }
+
+
+    private fun confirmEmptyScreen(state: AppState): Reduction {
+        if (state.library.isScanning) return Reduction(state)
+        val storageAvailable = state.device.internalStorageAvailable || state.device.removableStorageAvailable
+        return when {
+            !storageAvailable -> push(state, Screen.Storage)
+            state.currentScreen == Screen.Songs || state.currentScreen == Screen.Albums ||
+                state.currentScreen == Screen.Artists ||
+                state.currentScreen == Screen.Audiobooks -> push(state, Screen.Storage)
+            state.currentScreen == Screen.Queue || state.currentScreen == Screen.Favorites ||
+                state.currentScreen == Screen.RecentlyPlayed || state.currentScreen is Screen.PlaylistTracks ||
+                state.currentScreen is Screen.Folders || state.currentScreen is Screen.AlbumSongs ||
+                state.currentScreen is Screen.ArtistSongs || state.currentScreen is Screen.ArtistAlbums ||
+                state.currentScreen is Screen.AudiobookChapters -> back(state)
+            // Confirm must never be inert on an empty screen: the empty state always
+            // offers an action, so leaving is the safe default.
+            else -> back(state)
+        }
+    }
+
+    private fun openContextOptions(state: AppState): Reduction = when (val screen = state.currentScreen) {
+        Screen.Bluetooth -> {
+            val row = ScreenContent.rows(state).getOrNull(state.selectedIndex) as? Action
+            val key = row?.key.orEmpty()
+            if (key.startsWith("bt_device:")) push(state, Screen.BluetoothDevice(key.substringAfter(':')), selectedIndex = 1)
+            else Reduction(state)
+        }
+        Screen.Songs, Screen.Favorites, Screen.RecentlyPlayed, is Screen.AlbumSongs,
+        is Screen.ArtistSongs, is Screen.FacetTracks, is Screen.AudiobookChapters -> {
+            val row = ScreenContent.rows(state).getOrNull(state.selectedIndex) as? TrackRow
+            if (row == null) Reduction(state) else push(state, Screen.TrackOptions(row.track.id))
+        }
+        Screen.Audiobooks -> {
+            val key = (ScreenContent.rows(state).getOrNull(state.selectedIndex) as? Action)?.key
+            if (key == null || !key.startsWith(ScreenContent.AUDIOBOOK_KEY_PREFIX)) Reduction(state)
+            else push(state, Screen.AudiobookOptions(key.substringAfter(':')))
+        }
+        Screen.Albums, Screen.Artists, is Screen.ArtistAlbums,
+        is Screen.FacetAlbums, is Screen.FacetArtists, is Screen.FacetArtistAlbums,
+        Screen.Playlists ->
+            ScreenContent.selectedCollection(state)?.let { (title, ids) ->
+                push(state, Screen.CollectionOptions(title, ids))
+            } ?: Reduction(state)
+        is Screen.Folders -> {
+            val row = ScreenContent.rows(state).getOrNull(state.selectedIndex)
+            when (row) {
+                is TrackRow -> push(state, Screen.TrackOptions(row.track.id))
+                is Folder -> ScreenContent.selectedCollection(state)?.let { (title, ids) ->
+                    push(state, Screen.CollectionOptions(title, ids))
+                } ?: Reduction(state)
+                else -> Reduction(state)
+            }
+        }
+        is Screen.PlaylistTracks -> {
+            val row = ScreenContent.rows(state).getOrNull(state.selectedIndex) as? TrackRow
+            if (row == null) Reduction(state) else push(state, Screen.TrackOptions(row.track.id, screen.playlistId))
+        }
+        Screen.Queue -> ScreenContent.rows(state).getOrNull(state.selectedIndex)
+            ?.let { openQueueEntryOptions(state, it) } ?: Reduction(state)
+        else -> Reduction(state)
+    }
+
+    private fun openQueueEntryOptions(state: AppState, row: ScreenRow): Reduction = when (row) {
+        is TrackRow -> row.queueEntry?.let { push(state, Screen.QueueOptions(it.id)) } ?: Reduction(state)
+        is Group -> row.key.takeIf { it.startsWith("queue_missing:") }
+            ?.substringAfter(':')?.toLongOrNull()?.let { push(state, Screen.QueueOptions(it)) }
+            ?: Reduction(state)
+        else -> Reduction(state)
+    }
+
+    private fun playQueueEntryNow(state: AppState, entryId: Long, trackId: Long): Reduction =
+        if (entryId == state.playback.currentQueueEntryId && isTrackLoaded(state, trackId)) {
+            Reduction(toNowPlaying(state))
+        } else Reduction(toNowPlaying(state), listOf(PlayQueueEntry(entryId)))
+
+    private fun back(state: AppState): Reduction {
+        // Leaving the screen powers the tuner down and releases the device, so
+        // FM never keeps the output while the rest of the app runs.
+        if (state.currentScreen == Screen.FmRadio && state.screenStack.size > 1) {
+            return Reduction(pop(state), listOf(FmClose))
+        }
+        if (state.screenStack.size > 1) return Reduction(pop(state))
+        val current = state.currentScreen
+        if (current is Screen.Folders) {
+            val parent = ScreenContent.parentFolder(current)
+            if (parent != null) return Reduction(state.copy(screenStack = listOf(ScreenEntry(parent))))
+        }
+        return Reduction(state)
+    }
+
+    private fun push(state: AppState, screen: Screen, selectedIndex: Int = 0): Reduction =
+        Reduction(pushState(state, screen, selectedIndex))
+    private fun pushState(state: AppState, screen: Screen, selectedIndex: Int = 0): AppState =
+        state.copy(screenStack = state.screenStack + ScreenEntry(screen, selectedIndex))
+    private fun pop(state: AppState, count: Int = 1): AppState {
+        val keep = (state.screenStack.size - count).coerceAtLeast(1)
+        return if (keep == state.screenStack.size) state else state.copy(screenStack = state.screenStack.take(keep))
+    }
+
+    private fun toNowPlaying(state: AppState): AppState {
+        if (state.currentScreen == Screen.NowPlaying) return state
+        val existing = state.screenStack.indexOfLast { it.screen == Screen.NowPlaying }
+        return if (existing < 0) pushState(state, Screen.NowPlaying)
+        else state.copy(screenStack = state.screenStack.take(existing + 1))
+    }
+    private fun setSelected(state: AppState, index: Int): AppState = state.copy(screenStack = state.screenStack.dropLast(1) + state.currentEntry.copy(selectedIndex = index))
+    private fun normalizeSelection(state: AppState): AppState {
+        val count = ScreenContent.rows(state).size
+        val first = ListNavigationPolicy.firstSelectableIndex(state.currentScreen, count)
+        return setSelected(state, if (count == 0) 0 else state.selectedIndex.coerceIn(first, count - 1))
+    }
+
+    private fun preserveSelection(previous: AppState, updated: AppState): AppState {
+        val selectedRow = ScreenContent.rows(previous).getOrNull(previous.selectedIndex)
+            ?: return normalizeSelection(updated)
+        val newRows = ScreenContent.rows(updated)
+        val restoredIndex = newRows.indexOfFirst { ScreenContent.sameRowIdentity(selectedRow, it) }
+        return if (restoredIndex >= 0) setSelected(updated, restoredIndex) else normalizeSelection(updated)
+    }
+}
