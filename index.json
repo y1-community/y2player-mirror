@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-11-20T16:40:01Z",
+  "generated_at": "2026-11-20T21:16:47Z",
   "source_repo": "schulzcode/Y2Player",
   "source_fallback_repo": "",
   "mirror_repo": "y1-community/y2player-mirror",
@@ -105,8 +105,8 @@
           "platform": "linux",
           "model": "Y2",
           "type": "Stock",
-          "size": 547655038,
-          "sha256": "aef73c7166a2774d8eb7533cab25701699f904a1de282f1912f08e98d188d842",
+          "size": 547599337,
+          "sha256": "b4bea9da1ea371a5a2f2e97cd7c5fb427a61ed83d8c17c151ce84c751acb0423",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/Release2.5/rom_y2-linux.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/Release2.5/rom_y2-linux.zip"
         },
@@ -116,8 +116,8 @@
           "platform": "linux-arm64",
           "model": "Y2",
           "type": "Stock",
-          "size": 372559041,
-          "sha256": "3df5f32296369031a584499d1ea41c83f4845046d4ef42a33a4d3e7f935061aa",
+          "size": 372503597,
+          "sha256": "5fb9743b4aaa75ae2c8f5998d6b0556ef0255b4afb4c724573897025dcd0da73",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/Release2.5/rom_y2-linux-arm64.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/Release2.5/rom_y2-linux-arm64.zip"
         },
@@ -138,8 +138,8 @@
           "platform": "macos",
           "model": "Y2",
           "type": "Stock",
-          "size": 400450894,
-          "sha256": "ea6abe6e56f239cb3754f17efa913ae9f5856f2dcf3f6f5bb9abdf495143f810",
+          "size": 347770045,
+          "sha256": "017203236befc2e3cb5b62e547b47f6e2bf77fa0479c72e2acdfa8e2953525a5",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/Release2.5/rom_y2-macos.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/Release2.5/rom_y2-macos.zip"
         }
@@ -188,8 +188,8 @@
           "platform": "linux",
           "model": "Y2",
           "type": "Stock",
-          "size": 547624458,
-          "sha256": "7db94da2fb26e8713fd32f2a7be21d8d8d80cd3ce114b9052fbf8b6f6c9de8a1",
+          "size": 547568757,
+          "sha256": "81e6333831bb13af211c5dfe247729debb36eaef94d348bf60c53e33261f109e",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/ReleaseV2.3/rom_y2-linux.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/ReleaseV2.3/rom_y2-linux.zip"
         },
@@ -199,8 +199,8 @@
           "platform": "linux-arm64",
           "model": "Y2",
           "type": "Stock",
-          "size": 372528461,
-          "sha256": "e98402870a2f07130b2e695618d00e1c33f9a352f1fd5964bbac0d8d311880d7",
+          "size": 372473017,
+          "sha256": "9555fc92fc726285499d92f8397019b831b6b55b97a21bf6ab1948985fef8fd3",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/ReleaseV2.3/rom_y2-linux-arm64.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/ReleaseV2.3/rom_y2-linux-arm64.zip"
         },
@@ -221,8 +221,8 @@
           "platform": "macos",
           "model": "Y2",
           "type": "Stock",
-          "size": 400420314,
-          "sha256": "180c3e785f5cf34a0da6449b7074ca62685e6cc51b689d4d3cdc40a7a65dbbcf",
+          "size": 347739465,
+          "sha256": "dd9039ba404250b1db9d70909c105d82d3d57c5be6f467bb8aa65cb9fd44ceda",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/ReleaseV2.3/rom_y2-macos.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/ReleaseV2.3/rom_y2-macos.zip"
         }
@@ -271,8 +271,8 @@
           "platform": "linux",
           "model": "Y2",
           "type": "Stock",
-          "size": 547606989,
-          "sha256": "c2d489230d0c8f2c408bff6d3b7e1deeefe476e4f54395c0fba40ce56d1a1099",
+          "size": 547551288,
+          "sha256": "16df6ba60307432540e1e878a681481bcb4dc21ab63f482361a6ddc6ccc88331",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/RealeaseV2.2.2/rom_y2-linux.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/RealeaseV2.2.2/rom_y2-linux.zip"
         },
@@ -282,8 +282,8 @@
           "platform": "linux-arm64",
           "model": "Y2",
           "type": "Stock",
-          "size": 372510992,
-          "sha256": "d56ff2792d2f16f9f4b8fa41ae672a72a58da53b3fe3b7251e8fb4dd629b3a6e",
+          "size": 372455548,
+          "sha256": "deefc1aa0d86d1197a18fdfa09636cad140d68957df3b6e4e5ee09b886f2b9e5",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/RealeaseV2.2.2/rom_y2-linux-arm64.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/RealeaseV2.2.2/rom_y2-linux-arm64.zip"
         },
@@ -304,8 +304,8 @@
           "platform": "macos",
           "model": "Y2",
           "type": "Stock",
-          "size": 400402845,
-          "sha256": "68a6bdefbe07941f1204c34cedfb00ff7b5185c83d64955f92c88616943b8f03",
+          "size": 347721996,
+          "sha256": "304df588024ef1f4bddd3037599c36766903f82379f8dc16278950b23a4f0da5",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/RealeaseV2.2.2/rom_y2-macos.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/RealeaseV2.2.2/rom_y2-macos.zip"
         }
@@ -354,8 +354,8 @@
           "platform": "linux",
           "model": "Y2",
           "type": "Stock",
-          "size": 547574902,
-          "sha256": "370e791659b2c382dbcc166542e197ead6bbe9b5b9201ea2ef5ecb5efd8d0c20",
+          "size": 547519201,
+          "sha256": "8f1190ae1ea8aa1517295dd3803d10009f4a84039a46752ad730da714ff925e1",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/ReleaseV2.2.1/rom_y2-linux.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/ReleaseV2.2.1/rom_y2-linux.zip"
         },
@@ -365,8 +365,8 @@
           "platform": "linux-arm64",
           "model": "Y2",
           "type": "Stock",
-          "size": 372478905,
-          "sha256": "77a88ae625cfd76ad6c15a118d84c4aa297a5d409c52f6169b4c201a51618764",
+          "size": 372423461,
+          "sha256": "7dd5880359fead5a7d32be956f0210f62e463039d25089a2da6e80f53ca32a16",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/ReleaseV2.2.1/rom_y2-linux-arm64.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/ReleaseV2.2.1/rom_y2-linux-arm64.zip"
         },
@@ -387,8 +387,8 @@
           "platform": "macos",
           "model": "Y2",
           "type": "Stock",
-          "size": 400370758,
-          "sha256": "3fe91b4eaa1488b62795881d3c321d86fc5bbb63983abb62ba5915cc53a9050b",
+          "size": 347689909,
+          "sha256": "d62c80f033ef6fd54f196a4521b23ce650d49f3f4d775e498586a7466457018f",
           "url": "https://github.com/y1-community/y2player-mirror/releases/download/ReleaseV2.2.1/rom_y2-macos.zip",
           "fallback_url": "https://github.com/ryan-specter/y2player-mirror/releases/download/ReleaseV2.2.1/rom_y2-macos.zip"
         }
